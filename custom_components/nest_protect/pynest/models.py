@@ -53,13 +53,31 @@ class NestResponse:
     _2fa_state: str = None
     _2fa_enabled: bool = None
     _2fa_state_changed: str = None
+    created_at: datetime.datetime = field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )
 
     def is_expired(self, buffer_seconds: int = 0):
-        """Check if session is expired, with optional early-expiry buffer."""
+        """Check if the 30-day Nest session cookie is expired."""
         expiry_date = datetime.datetime.strptime(
             self.expires_in, "%a, %d-%b-%Y %H:%M:%S %Z"
         ).replace(tzinfo=datetime.UTC)
         return expiry_date <= datetime.datetime.now(datetime.UTC) + datetime.timedelta(
+            seconds=buffer_seconds
+        )
+
+    def is_token_expired(self, buffer_seconds: int = 0) -> bool:
+        """Check if the Nest access token has exceeded its 1-hour lifetime.
+
+        The token lifetime is controlled by expire_after in authenticate() and is
+        separate from the 30-day session cookie expiry stored in expires_in.
+        """
+        from .const import NEST_TOKEN_LIFETIME_SECONDS
+
+        token_expiry = self.created_at + datetime.timedelta(
+            seconds=NEST_TOKEN_LIFETIME_SECONDS
+        )
+        return token_expiry <= datetime.datetime.now(datetime.UTC) + datetime.timedelta(
             seconds=buffer_seconds
         )
 
@@ -75,6 +93,7 @@ class NestResponse:
             "weave": self.weave,
             "user": self.user,
             "is_staff": self.is_staff,
+            "created_at": self.created_at.isoformat(),
         }
 
     @classmethod
@@ -95,6 +114,14 @@ class NestResponse:
         )
         if not all(key in data for key in required):
             return None
+
+        created_at = datetime.datetime.now(datetime.UTC)
+        if raw := data.get("created_at"):
+            try:
+                created_at = datetime.datetime.fromisoformat(raw)
+            except ValueError:
+                pass
+
         return cls(
             access_token=data["access_token"],
             email=data["email"],
@@ -105,6 +132,7 @@ class NestResponse:
             weave=data["weave"],
             user=data["user"],
             is_staff=data["is_staff"],
+            created_at=created_at,
         )
 
 

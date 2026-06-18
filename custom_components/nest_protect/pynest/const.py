@@ -27,6 +27,9 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 APP_LAUNCH_URL_FORMAT = "{host}/api/0.1/user/{user_id}/app_launch"
 NEST_AUTH_URL_JWT = "https://nestauthproxyservice-pa.googleapis.com/v1/issue_jwt"
 
+# Nest access token lifetime matches the expire_after value sent to NEST_AUTH_URL_JWT
+NEST_TOKEN_LIFETIME_SECONDS = 3600
+
 NEST_REQUEST = {
     "known_bucket_types": [
         BucketType.KRYPTONITE,

@@ -96,6 +96,13 @@ class NestSessionManager:
             LOGGER.debug("Persisted session expired, falling through to cookie auth")
             return None
 
+        if restored_session.is_token_expired(buffer_seconds=SESSION_EXPIRY_BUFFER_SECONDS):
+            LOGGER.debug(
+                "Persisted Nest access token expired (issued: %s), re-authenticating",
+                restored_session.created_at.isoformat(),
+            )
+            return None
+
         LOGGER.debug(
             "Reusing persisted Nest session (expires: %s)",
             restored_session.expires_in,
@@ -152,11 +159,19 @@ class NestSessionManager:
         return await self._client.authenticate(auth.access_token)
 
     async def ensure_session(self) -> None:
-        """Ensure a valid Nest session exists, refreshing if needed."""
-        if self._client.nest_session and not self._client.nest_session.is_expired(
-            buffer_seconds=SESSION_EXPIRY_BUFFER_SECONDS
-        ):
-            return
+        """Ensure a valid Nest session exists, refreshing if needed.
+
+        Checks both the 30-day session cookie expiry and the 1-hour access token
+        lifetime so the subscriber proactively refreshes before Nest returns a 401.
+        """
+        if self._client.nest_session:
+            session = self._client.nest_session
+            if not session.is_expired(
+                buffer_seconds=SESSION_EXPIRY_BUFFER_SECONDS
+            ) and not session.is_token_expired(
+                buffer_seconds=SESSION_EXPIRY_BUFFER_SECONDS
+            ):
+                return
 
         await self.async_refresh_session()
 
