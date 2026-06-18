@@ -15,7 +15,9 @@ from custom_components.nest_protect.pynest.models import NestResponse
 from custom_components.nest_protect.session import NestSessionManager
 
 
-def _make_nest_response(*, expired: bool = False) -> NestResponse:
+def _make_nest_response(
+    *, expired: bool = False, token_expired: bool = False
+) -> NestResponse:
     """Create a NestResponse for testing."""
     if expired:
         dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=10)
@@ -23,6 +25,12 @@ def _make_nest_response(*, expired: bool = False) -> NestResponse:
         dt = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=30)
 
     expires_str = dt.strftime("%a, %d-%b-%Y %H:%M:%S") + " GMT"
+
+    # created_at controls is_token_expired(): >1 hour old → expired
+    if token_expired:
+        created_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=2)
+    else:
+        created_at = datetime.datetime.now(datetime.UTC)
 
     return NestResponse(
         access_token="test-token",
@@ -34,6 +42,7 @@ def _make_nest_response(*, expired: bool = False) -> NestResponse:
         weave={},
         user="user.1",
         is_staff=False,
+        created_at=created_at,
     )
 
 
@@ -369,3 +378,92 @@ async def test_backoff_interval_increases():
     for _ in range(10):
         manager.record_failure()
     assert manager.backoff_interval == BACKOFF_INTERVALS[-1]
+
+
+@pytest.mark.asyncio
+async def test_restore_token_expired_session_falls_through():
+    """Session whose 30-day cookie is valid but 1-hour access token is expired skips Nest call."""
+    stale_session = _make_nest_response(expired=False, token_expired=True)
+    stored_data = {
+        "nest_session": stale_session.to_dict(),
+        "transport_url": "https://transport.example.com",
+    }
+
+    new_nest_session = _make_nest_response(expired=False)
+
+    client = MagicMock()
+    client.issue_token = "https://accounts.google.com/issue"
+    client.cookies = "SID=test"
+    client.refresh_token = None
+    client.get_first_data = AsyncMock(return_value=_make_first_data())
+    client.get_access_token_from_cookies = AsyncMock(
+        return_value=MagicMock(access_token="new-google-token")
+    )
+    client.authenticate = AsyncMock(return_value=new_nest_session)
+    client.nest_session = None
+    client.transport_url = None
+    client.refreshed_cookies = None
+
+    store = MagicMock()
+    store.async_load = AsyncMock(return_value=stored_data)
+    store.async_save = AsyncMock()
+
+    manager = NestSessionManager(client=client, store=store)
+
+    result = await manager.async_setup()
+
+    assert result is not None
+    # Should NOT have tried get_first_data with the stale token
+    client.get_first_data.assert_called_once()
+    # The one get_first_data call should be after fresh auth, not with stale token
+    client.get_access_token_from_cookies.assert_called_once()
+    client.authenticate.assert_called_once_with("new-google-token")
+    store.async_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_proactively_refreshes_before_token_expiry():
+    """ensure_session refreshes when the 1-hour access token is nearly expired."""
+    nearly_expired_session = _make_nest_response(expired=False, token_expired=True)
+    new_session = _make_nest_response(expired=False)
+
+    client = MagicMock()
+    client.nest_session = nearly_expired_session
+    client.auth = MagicMock(access_token="existing-google-token")
+    client.auth.is_expired = MagicMock(return_value=False)
+    client.authenticate = AsyncMock(return_value=new_session)
+
+    store = MagicMock()
+    store.async_save = AsyncMock()
+
+    manager = NestSessionManager(client=client, store=store)
+
+    await manager.ensure_session()
+
+    # Should have refreshed even though the 30-day session cookie hasn't expired
+    client.authenticate.assert_called_once_with("existing-google-token")
+    store.async_save.assert_called_once()
+    assert client.nest_session == new_session
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_no_refresh_when_token_fresh():
+    """ensure_session skips refresh when the access token is still within its lifetime."""
+    fresh_session = _make_nest_response(expired=False, token_expired=False)
+
+    client = MagicMock()
+    client.nest_session = fresh_session
+    client.auth = None
+    client.get_access_token = AsyncMock()
+    client.authenticate = AsyncMock()
+
+    store = MagicMock()
+    store.async_save = AsyncMock()
+
+    manager = NestSessionManager(client=client, store=store)
+
+    await manager.ensure_session()
+
+    client.get_access_token.assert_not_called()
+    client.authenticate.assert_not_called()
+    store.async_save.assert_not_called()
